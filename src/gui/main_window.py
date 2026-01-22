@@ -34,6 +34,7 @@ class MainWindow(QMainWindow):
         self._setup_window()
         self._init_ui()
         self._connect_signals()
+        self._setup_workspace_communication()
         
         # Set default workspace
         self._switch_workspace(DEFAULT_WORKSPACE)
@@ -134,6 +135,53 @@ class MainWindow(QMainWindow):
         for button in self._nav_buttons.values():
             button.workspace_selected.connect(self._switch_workspace)
     
+    def _setup_workspace_communication(self):
+        """Set up communication channels between workspaces."""
+        # Get workspace references
+        input_workspace: InputWorkspace = self._workspaces.get(WorkspaceID.INPUT)
+        analysis_workspace: AnalysisWorkspace = self._workspaces.get(WorkspaceID.ANALYSIS)
+        
+        # Set up callback for Analysis workspace to get Input data
+        if input_workspace and analysis_workspace:
+            analysis_workspace.set_input_data_callback(
+                self._get_input_workspace_data
+            )
+    
+    def _get_input_workspace_data(self) -> dict:
+        """
+        Get data from the Input workspace for use by other workspaces.
+        
+        Returns:
+            dict: Contains selected_files, grouped_files, and grouping_enabled
+        """
+        input_workspace: InputWorkspace = self._workspaces.get(WorkspaceID.INPUT)
+        
+        if not input_workspace:
+            return {
+                'selected_files': [],
+                'grouped_files': {},
+                'grouping_enabled': False
+            }
+        
+        # Get selected files
+        selected_files = input_workspace.get_selected_files()
+        
+        # Get grouped files and check if grouping is enabled
+        grouped_files = input_workspace.get_grouped_files()
+        
+        # Determine if grouping is actually enabled
+        # (if there's more than one group and it's not just "all")
+        grouping_enabled = (
+            len(grouped_files) > 1 or 
+            (len(grouped_files) == 1 and "all" not in grouped_files)
+        )
+        
+        return {
+            'selected_files': selected_files,
+            'grouped_files': grouped_files,
+            'grouping_enabled': grouping_enabled
+        }
+    
     def _switch_workspace(self, workspace_id: str):
         """
         Switch to the specified workspace.
@@ -161,4 +209,3 @@ class MainWindow(QMainWindow):
         
         # Switch the visible workspace
         self.workspace_container.setCurrentWidget(new_workspace)
-
