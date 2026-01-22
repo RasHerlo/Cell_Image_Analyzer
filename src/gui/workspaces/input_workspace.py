@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import QTabWidget
 from PyQt6.QtCore import Qt
 
 from .base_workspace import BaseWorkspace
-from .input_tabs import FileImportTab
+from .input_tabs import FileImportTab, GroupsTab
 from ...utils.constants import WorkspaceID, Colors
 
 
@@ -17,7 +17,7 @@ class InputWorkspace(BaseWorkspace):
     
     Uses a tabbed interface to organize different input functions:
     - File Import: Select and import image files
-    - (Future tabs can be added here)
+    - Groups: Organize files into groups based on naming patterns
     """
     
     @property
@@ -63,6 +63,9 @@ class InputWorkspace(BaseWorkspace):
         # Create and add tabs
         self._create_tabs()
         
+        # Connect signals
+        self._connect_tab_signals()
+        
         # Add tab widget to layout
         self.main_layout.addWidget(self.tab_widget)
         
@@ -75,9 +78,24 @@ class InputWorkspace(BaseWorkspace):
         self.file_import_tab = FileImportTab()
         self.tab_widget.addTab(self.file_import_tab, self.file_import_tab.tab_name)
         
-        # Future tabs can be added here:
-        # self.some_other_tab = SomeOtherTab()
-        # self.tab_widget.addTab(self.some_other_tab, self.some_other_tab.tab_name)
+        # Groups tab
+        self.groups_tab = GroupsTab()
+        self.tab_widget.addTab(self.groups_tab, self.groups_tab.tab_name)
+    
+    def _connect_tab_signals(self):
+        """Connect signals between tabs for data flow."""
+        # When file selection changes in Import tab, update Groups tab
+        self.file_import_tab.files_selected.connect(self._on_files_selected)
+    
+    def _on_files_selected(self, files: list[str]):
+        """
+        Handle file selection changes from Import tab.
+        
+        Args:
+            files: List of selected file paths.
+        """
+        # Update the Groups tab with the new file selection
+        self.groups_tab.set_selected_files(files)
     
     def _on_tab_changed(self, index: int):
         """Handle tab change events."""
@@ -91,6 +109,11 @@ class InputWorkspace(BaseWorkspace):
         current_tab = self.tab_widget.widget(index)
         if hasattr(current_tab, 'on_tab_selected'):
             current_tab.on_tab_selected()
+        
+        # If switching to Groups tab, ensure it has latest file selection
+        if current_tab == self.groups_tab:
+            selected_files = self.file_import_tab.get_selected_files()
+            self.groups_tab.set_selected_files(selected_files)
     
     def on_activated(self):
         """Called when Input workspace becomes active."""
@@ -107,3 +130,12 @@ class InputWorkspace(BaseWorkspace):
             list[str]: List of selected file paths.
         """
         return self.file_import_tab.get_selected_files()
+    
+    def get_grouped_files(self) -> dict[str, list[str]]:
+        """
+        Get the files organized into groups from the Groups tab.
+        
+        Returns:
+            dict: Mapping of group keys to lists of file paths.
+        """
+        return self.groups_tab.get_grouped_files()
