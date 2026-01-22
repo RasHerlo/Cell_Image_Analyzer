@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import QTabWidget
 from PyQt6.QtCore import Qt
 
 from .base_workspace import BaseWorkspace
-from .analysis_tabs import PickleDataFileTab
+from .analysis_tabs import PickleDataFileTab, RawProcessingTab
 from ...utils.constants import WorkspaceID, Colors
 
 
@@ -19,7 +19,7 @@ class AnalysisWorkspace(BaseWorkspace):
     
     Uses a tabbed interface to organize different analysis functions:
     - Pickle DataFile: Create, load, and manage pickle data files
-    - (Future tabs can be added here)
+    - Raw Processing: Analyze raw image data and generate previews
     """
     
     @property
@@ -65,6 +65,9 @@ class AnalysisWorkspace(BaseWorkspace):
         # Create and add tabs
         self._create_tabs()
         
+        # Set up inter-tab communication
+        self._setup_tab_communication()
+        
         # Add tab widget to layout
         self.main_layout.addWidget(self.tab_widget)
         
@@ -77,9 +80,19 @@ class AnalysisWorkspace(BaseWorkspace):
         self.pickle_datafile_tab = PickleDataFileTab()
         self.tab_widget.addTab(self.pickle_datafile_tab, self.pickle_datafile_tab.tab_name)
         
-        # Future tabs can be added here:
-        # self.some_analysis_tab = SomeAnalysisTab()
-        # self.tab_widget.addTab(self.some_analysis_tab, self.some_analysis_tab.tab_name)
+        # Raw Processing tab
+        self.raw_processing_tab = RawProcessingTab()
+        self.tab_widget.addTab(self.raw_processing_tab, self.raw_processing_tab.tab_name)
+    
+    def _setup_tab_communication(self):
+        """Set up communication between tabs."""
+        # Raw Processing tab needs access to pickle DataFrame
+        self.raw_processing_tab.set_pickle_data_callback(self.get_dataframe)
+        
+        # When pickle file is loaded/created, refresh Raw Processing file list
+        self.pickle_datafile_tab.pickle_loaded.connect(
+            lambda _: self.raw_processing_tab.refresh_file_list()
+        )
     
     def set_input_data_callback(self, callback: Callable):
         """
