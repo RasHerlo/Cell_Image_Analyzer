@@ -89,6 +89,12 @@ class AnalysisWorkspace(BaseWorkspace):
         # Raw Processing tab needs access to pickle DataFrame
         self.raw_processing_tab.set_pickle_data_callback(self.get_dataframe)
         
+        # Raw Processing tab needs to save modified DataFrame
+        self.raw_processing_tab.set_save_pickle_callback(self._update_dataframe)
+        
+        # Raw Processing tab needs to get pickle file path
+        self.raw_processing_tab.set_pickle_path_callback(self.get_pickle_path)
+        
         # When pickle file is loaded/created, refresh Raw Processing file list
         self.pickle_datafile_tab.pickle_loaded.connect(
             lambda _: self.raw_processing_tab.refresh_file_list()
@@ -143,3 +149,15 @@ class AnalysisWorkspace(BaseWorkspace):
             The file path or None.
         """
         return self.pickle_datafile_tab.get_pickle_path()
+    
+    def _update_dataframe(self, df: 'pd.DataFrame', filepath: str):
+        """
+        Update the DataFrame in the Pickle DataFile tab.
+        
+        This is called when another tab modifies the DataFrame and saves it.
+        
+        Args:
+            df: The updated DataFrame.
+            filepath: The path where the DataFrame was saved.
+        """
+        self.pickle_datafile_tab.update_dataframe(df, filepath)

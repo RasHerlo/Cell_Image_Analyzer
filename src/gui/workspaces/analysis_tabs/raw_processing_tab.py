@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QPushButton, QCheckBox,
     QGroupBox, QSplitter, QFrame, QComboBox, QDoubleSpinBox,
-    QMessageBox
+    QMessageBox, QProgressDialog, QFileDialog
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 
@@ -43,15 +43,30 @@ class RawProcessingTab(BaseTab):
     
     def _init_ui(self):
         """Initialize the Raw Processing tab UI."""
-        # Callback to get pickle data
+        # Callbacks for pickle data management
         self._get_pickle_data_callback: Callable | None = None
+        self._save_pickle_data_callback: Callable | None = None
+        self._get_pickle_path_callback: Callable | None = None
+        
         self._current_image: np.ndarray | None = None
+        
+        # Threshold dragging state
+        self._threshold_line = None
+        self._threshold_drag_active = False
+        self._histogram_ax = None
+        self._heatmap_ax = None
         
         # Debounce timer for auto-preview on file selection change
         self._preview_debounce_timer = QTimer()
         self._preview_debounce_timer.setSingleShot(True)
         self._preview_debounce_timer.setInterval(400)  # 400ms delay
         self._preview_debounce_timer.timeout.connect(self._on_debounced_file_selection)
+        
+        # Debounce timer for threshold changes (from dragging or spinbox)
+        self._threshold_debounce_timer = QTimer()
+        self._threshold_debounce_timer.setSingleShot(True)
+        self._threshold_debounce_timer.setInterval(300)  # 300ms delay
+        self._threshold_debounce_timer.timeout.connect(self._on_debounced_threshold_change)
         
         # Create main layout with splitters
         main_splitter = QSplitter(Qt.Orientation.Vertical)
@@ -163,10 +178,92 @@ class RawProcessingTab(BaseTab):
         
         layout.addLayout(pixel_row)
         
-        # Placeholder for future analysis options
-        # (More toggle buttons can be added here)
+        # Background Threshold row
+        threshold_row = QHBoxLayout()
+        threshold_row.setSpacing(15)
+        
+        # Toggle checkbox
+        self.threshold_toggle = QCheckBox("Background Threshold")
+        self.threshold_toggle.setStyleSheet(f"""
+            QCheckBox {{
+                font-size: 12px;
+                color: {Colors.TEXT};
+                spacing: 8px;
+            }}
+            QCheckBox::indicator {{
+                width: 16px;
+                height: 16px;
+            }}
+            QCheckBox::indicator:unchecked {{
+                border: 2px solid {Colors.BORDER};
+                border-radius: 3px;
+                background-color: #FFFFFF;
+            }}
+            QCheckBox::indicator:checked {{
+                border: 2px solid {Colors.ACTIVE};
+                border-radius: 3px;
+                background-color: {Colors.ACTIVE};
+            }}
+        """)
+        self.threshold_toggle.toggled.connect(self._on_threshold_toggle_changed)
+        threshold_row.addWidget(self.threshold_toggle)
+        
+        # Threshold value spinbox
+        self.threshold_spin = QDoubleSpinBox()
+        self.threshold_spin.setRange(0, 1e10)
+        self.threshold_spin.setValue(0)
+        self.threshold_spin.setDecimals(1)
+        self.threshold_spin.setFixedWidth(100)
+        self.threshold_spin.setEnabled(False)  # Disabled by default
+        self.threshold_spin.setStyleSheet(f"""
+            QDoubleSpinBox {{
+                padding: 4px;
+                border: 1px solid {Colors.BORDER};
+                border-radius: 4px;
+                font-size: 11px;
+            }}
+            QDoubleSpinBox:disabled {{
+                background-color: #E0E0E0;
+                color: #999999;
+            }}
+        """)
+        self.threshold_spin.valueChanged.connect(self._on_threshold_spin_changed)
+        threshold_row.addWidget(self.threshold_spin)
+        
+        threshold_row.addStretch()
+        
+        layout.addLayout(threshold_row)
         
         layout.addStretch()
+        
+        # Process button row (lower right corner)
+        process_row = QHBoxLayout()
+        process_row.addStretch()
+        
+        self.process_button = QPushButton("Process")
+        self.process_button.setFixedWidth(100)
+        self.process_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.process_button.setStyleSheet(f"""
+            QPushButton {{
+                padding: 6px 16px;
+                background-color: {Colors.ACTIVE};
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-size: 11px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: #16A085;
+            }}
+            QPushButton:pressed {{
+                background-color: #0E6655;
+            }}
+        """)
+        self.process_button.clicked.connect(self._on_process)
+        process_row.addWidget(self.process_button)
+        
+        layout.addLayout(process_row)
         
         return group_box
     
@@ -337,6 +434,12 @@ class RawProcessingTab(BaseTab):
         self.figure.set_facecolor('#FAFAFA')
         self.canvas = FigureCanvas(self.figure)
         self.canvas.setStyleSheet("background-color: #FAFAFA;")
+        
+        # Connect matplotlib events for threshold line dragging
+        self.canvas.mpl_connect('button_press_event', self._on_canvas_press)
+        self.canvas.mpl_connect('button_release_event', self._on_canvas_release)
+        self.canvas.mpl_connect('motion_notify_event', self._on_canvas_motion)
+        
         layout.addWidget(self.canvas, 1)
         
         return group_box
@@ -349,6 +452,24 @@ class RawProcessingTab(BaseTab):
             callback: Function that returns the current DataFrame.
         """
         self._get_pickle_data_callback = callback
+    
+    def set_save_pickle_callback(self, callback: Callable):
+        """
+        Set the callback function to save modified DataFrame.
+        
+        Args:
+            callback: Function that takes (DataFrame, filepath) and saves it.
+        """
+        self._save_pickle_data_callback = callback
+    
+    def set_pickle_path_callback(self, callback: Callable):
+        """
+        Set the callback function to get current pickle file path.
+        
+        Args:
+            callback: Function that returns the current pickle file path.
+        """
+        self._get_pickle_path_callback = callback
     
     def refresh_file_list(self):
         """Refresh the file list from the pickle DataFrame."""
@@ -603,40 +724,91 @@ class RawProcessingTab(BaseTab):
             return
         
         image = self._current_image
+        threshold_enabled = self.threshold_toggle.isChecked()
+        threshold_value = self.threshold_spin.value()
+        
+        # Update threshold spinbox range to match image
+        img_min, img_max = float(image.min()), float(image.max())
+        self.threshold_spin.setRange(img_min, img_max)
         
         # Clear previous figure
         self.figure.clear()
+        self._threshold_line = None
         
         # Create subplots
-        ax1 = self.figure.add_subplot(121)
-        ax2 = self.figure.add_subplot(122)
+        self._heatmap_ax = self.figure.add_subplot(121)
+        self._histogram_ax = self.figure.add_subplot(122)
         
         # Heatmap (preserve aspect ratio)
-        im = ax1.imshow(image, cmap='viridis', aspect='equal')
-        ax1.set_title('Image Heatmap', fontsize=10)
-        ax1.set_xlabel('X (pixels)', fontsize=9)
-        ax1.set_ylabel('Y (pixels)', fontsize=9)
-        self.figure.colorbar(im, ax=ax1, shrink=0.8)
+        if threshold_enabled and threshold_value > img_min:
+            # Create masked image where values below threshold are black
+            display_image = image.copy()
+            mask = display_image < threshold_value
+            # Use a custom colormap with black for masked values
+            masked_image = np.ma.masked_where(mask, display_image)
+            im = self._heatmap_ax.imshow(masked_image, cmap='viridis', aspect='equal')
+            # Overlay black for masked regions
+            self._heatmap_ax.imshow(mask, cmap='Greys', aspect='equal', alpha=mask.astype(float))
+        else:
+            im = self._heatmap_ax.imshow(image, cmap='viridis', aspect='equal')
+        
+        self._heatmap_ax.set_title('Image Heatmap', fontsize=10)
+        self._heatmap_ax.set_xlabel('X (pixels)', fontsize=9)
+        self._heatmap_ax.set_ylabel('Y (pixels)', fontsize=9)
+        self.figure.colorbar(im, ax=self._heatmap_ax, shrink=0.8)
         
         # Histogram
         flat_image = image.flatten()
-        ax2.hist(flat_image, bins=256, color=Colors.ACCENT, alpha=0.7, edgecolor='none')
-        ax2.set_title('Pixel Intensity Distribution', fontsize=10)
-        ax2.set_xlabel('Pixel Value', fontsize=9)
-        ax2.set_ylabel('Frequency', fontsize=9)
+        
+        if threshold_enabled and threshold_value > img_min:
+            # Split histogram into two parts: below and above threshold
+            below_threshold = flat_image[flat_image < threshold_value]
+            above_threshold = flat_image[flat_image >= threshold_value]
+            
+            # Calculate bins for consistent appearance
+            bins = np.linspace(img_min, img_max, 257)
+            
+            # Plot below threshold (darker color)
+            if len(below_threshold) > 0:
+                self._histogram_ax.hist(below_threshold, bins=bins, color='#404040', 
+                                        alpha=0.8, edgecolor='none', label='Below threshold')
+            
+            # Plot above threshold (accent color)
+            if len(above_threshold) > 0:
+                self._histogram_ax.hist(above_threshold, bins=bins, color=Colors.ACCENT, 
+                                        alpha=0.7, edgecolor='none', label='Above threshold')
+            
+            # Draw threshold line
+            self._threshold_line = self._histogram_ax.axvline(
+                x=threshold_value, color='red', linewidth=2, linestyle='-',
+                picker=5  # Enable picking within 5 pixels
+            )
+            # Add a small marker at the bottom for dragging indication
+            xlim = self._histogram_ax.get_xlim()
+            ylim = self._histogram_ax.get_ylim()
+            self._histogram_ax.plot(threshold_value, ylim[0], 'rv', markersize=10, 
+                                    markeredgecolor='darkred', markeredgewidth=1)
+        else:
+            # Normal histogram without threshold
+            self._histogram_ax.hist(flat_image, bins=256, color=Colors.ACCENT, 
+                                    alpha=0.7, edgecolor='none')
+        
+        self._histogram_ax.set_title('Pixel Intensity Distribution', fontsize=10)
+        self._histogram_ax.set_xlabel('Pixel Value', fontsize=9)
+        self._histogram_ax.set_ylabel('Frequency', fontsize=9)
         
         # Apply scale
         if self.scale_combo.currentText() == "Logarithmic":
-            ax2.set_yscale('log')
+            self._histogram_ax.set_yscale('log')
         else:
-            ax2.set_yscale('linear')
+            self._histogram_ax.set_yscale('linear')
         
         # Apply Y limits if set
         ymin = self.ymin_spin.value()
         ymax = self.ymax_spin.value()
         
         if ymax > ymin:
-            ax2.set_ylim(ymin, ymax)
+            self._histogram_ax.set_ylim(ymin, ymax)
         
         # Adjust layout
         self.figure.tight_layout()
@@ -661,6 +833,335 @@ class RawProcessingTab(BaseTab):
         if self._current_image is not None:
             self._update_pixel_preview()
     
+    def _on_threshold_toggle_changed(self, checked: bool):
+        """Handle threshold toggle state change."""
+        self.threshold_spin.setEnabled(checked)
+        if self._current_image is not None:
+            self._update_pixel_preview()
+    
+    def _on_threshold_spin_changed(self, value: float):
+        """Handle threshold spinbox value change."""
+        # Start debounce timer for preview update
+        self._threshold_debounce_timer.start()
+    
+    def _on_debounced_threshold_change(self):
+        """Handle debounced threshold change - update preview."""
+        if self._current_image is not None and self.threshold_toggle.isChecked():
+            self._update_pixel_preview()
+    
+    def _on_canvas_press(self, event):
+        """Handle mouse press on canvas for threshold dragging."""
+        if not self.threshold_toggle.isChecked():
+            return
+        if event.inaxes != self._histogram_ax:
+            return
+        if event.button != 1:  # Left click only
+            return
+        
+        # Check if click is near the threshold line
+        threshold_value = self.threshold_spin.value()
+        xlim = self._histogram_ax.get_xlim()
+        
+        # Calculate click tolerance (5% of x-axis range)
+        tolerance = (xlim[1] - xlim[0]) * 0.05
+        
+        if abs(event.xdata - threshold_value) < tolerance:
+            self._threshold_drag_active = True
+            self.canvas.setCursor(Qt.CursorShape.SizeHorCursor)
+    
+    def _on_canvas_release(self, event):
+        """Handle mouse release on canvas."""
+        if self._threshold_drag_active:
+            self._threshold_drag_active = False
+            self.canvas.setCursor(Qt.CursorShape.ArrowCursor)
+            # Trigger final update after drag ends
+            self._threshold_debounce_timer.start()
+    
+    def _on_canvas_motion(self, event):
+        """Handle mouse motion on canvas for threshold dragging."""
+        if not self.threshold_toggle.isChecked():
+            return
+        
+        # Update cursor when hovering near threshold line
+        if event.inaxes == self._histogram_ax and not self._threshold_drag_active:
+            threshold_value = self.threshold_spin.value()
+            xlim = self._histogram_ax.get_xlim()
+            tolerance = (xlim[1] - xlim[0]) * 0.05
+            
+            if event.xdata is not None and abs(event.xdata - threshold_value) < tolerance:
+                self.canvas.setCursor(Qt.CursorShape.SizeHorCursor)
+            else:
+                self.canvas.setCursor(Qt.CursorShape.ArrowCursor)
+        
+        if not self._threshold_drag_active:
+            return
+        if event.inaxes != self._histogram_ax:
+            return
+        if event.xdata is None:
+            return
+        
+        # Clamp value to spinbox range
+        new_value = max(self.threshold_spin.minimum(), 
+                        min(self.threshold_spin.maximum(), event.xdata))
+        
+        # Update spinbox value (this triggers _on_threshold_spin_changed)
+        # Block signals temporarily to avoid double debounce
+        self.threshold_spin.blockSignals(True)
+        self.threshold_spin.setValue(new_value)
+        self.threshold_spin.blockSignals(False)
+        
+        # Update just the threshold line position for real-time feedback
+        self._update_threshold_line_position(new_value)
+        
+        # Start debounce timer for full preview update
+        self._threshold_debounce_timer.start()
+    
+    def _update_threshold_line_position(self, value: float):
+        """Update only the threshold line position without full redraw."""
+        if self._threshold_line is not None and self._histogram_ax is not None:
+            self._threshold_line.set_xdata([value, value])
+            # Also update the marker at the bottom
+            # We need to redraw just the line, not the entire figure
+            self.canvas.draw_idle()
+    
+    def _on_process(self):
+        """Handle Process button click - process all files with threshold."""
+        # Check if threshold toggle is ON
+        if not self.threshold_toggle.isChecked():
+            QMessageBox.warning(
+                self,
+                "Threshold Not Enabled",
+                "Please enable the Background Threshold toggle and set a threshold value before processing."
+            )
+            return
+        
+        # Check if we have the necessary callbacks
+        if not self._get_pickle_data_callback:
+            QMessageBox.warning(
+                self,
+                "No Data",
+                "No pickle data available. Please load a pickle file first."
+            )
+            return
+        
+        # Get the DataFrame
+        df = self._get_pickle_data_callback()
+        if df is None or df.empty:
+            QMessageBox.warning(
+                self,
+                "No Data",
+                "The pickle file is empty or not loaded."
+            )
+            return
+        
+        # Check required columns
+        if "Filename" not in df.columns or "Directory" not in df.columns:
+            QMessageBox.warning(
+                self,
+                "Missing Columns",
+                "The pickle file must contain 'Filename' and 'Directory' columns."
+            )
+            return
+        
+        threshold_value = self.threshold_spin.value()
+        
+        # Column names for the new data
+        COL_THRESHOLD = "Threshold"
+        COL_FRACTION = "Fraction"
+        COL_MEAN_VALUE = "Mean Value"
+        
+        # Check if columns already exist
+        columns_exist = all(col in df.columns for col in [COL_THRESHOLD, COL_FRACTION, COL_MEAN_VALUE])
+        
+        if columns_exist:
+            # Verify all threshold values are the same
+            existing_thresholds = df[COL_THRESHOLD].dropna().unique()
+            
+            if len(existing_thresholds) == 0:
+                threshold_info = "No threshold values found in existing data."
+            elif len(existing_thresholds) == 1:
+                threshold_info = f"Existing threshold value: {existing_thresholds[0]}"
+            else:
+                threshold_info = f"Warning: Inconsistent threshold values found: {list(existing_thresholds)}"
+            
+            # Show warning dialog with options
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("Columns Already Exist")
+            msg_box.setText(
+                f"The columns '{COL_THRESHOLD}', '{COL_FRACTION}', and '{COL_MEAN_VALUE}' already exist.\n\n"
+                f"{threshold_info}\n\n"
+                f"New threshold value: {threshold_value}\n\n"
+                "What would you like to do?"
+            )
+            msg_box.setIcon(QMessageBox.Icon.Warning)
+            
+            cancel_button = msg_box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+            overwrite_button = msg_box.addButton("Overwrite", QMessageBox.ButtonRole.AcceptRole)
+            save_as_button = msg_box.addButton("Save As...", QMessageBox.ButtonRole.ActionRole)
+            
+            msg_box.exec()
+            
+            clicked_button = msg_box.clickedButton()
+            
+            if clicked_button == cancel_button:
+                return
+            elif clicked_button == save_as_button:
+                # Get new file path
+                current_path = self._get_pickle_path_callback() if self._get_pickle_path_callback else ""
+                default_dir = os.path.dirname(current_path) if current_path else os.getcwd()
+                
+                new_filepath, _ = QFileDialog.getSaveFileName(
+                    self,
+                    "Save Processed Data As",
+                    os.path.join(default_dir, "processed_data.pkl"),
+                    "Pickle Files (*.pkl);;All Files (*)"
+                )
+                
+                if not new_filepath:
+                    return  # User cancelled
+                
+                if not new_filepath.endswith('.pkl'):
+                    new_filepath += '.pkl'
+                
+                save_as_path = new_filepath
+            else:
+                # Overwrite
+                save_as_path = None
+        else:
+            save_as_path = None
+        
+        # Process all files
+        self._process_files(df, threshold_value, COL_THRESHOLD, COL_FRACTION, COL_MEAN_VALUE, save_as_path)
+    
+    def _process_files(self, df: 'pd.DataFrame', threshold_value: float, 
+                       col_threshold: str, col_fraction: str, col_mean_value: str,
+                       save_as_path: str | None):
+        """
+        Process all files in the DataFrame with the given threshold.
+        
+        Args:
+            df: The DataFrame to process.
+            threshold_value: The threshold value to use.
+            col_threshold: Name of the threshold column.
+            col_fraction: Name of the fraction column.
+            col_mean_value: Name of the mean value column.
+            save_as_path: If provided, save to this path instead of original.
+        """
+        import pandas as pd
+        
+        total_files = len(df)
+        
+        # Initialize result lists
+        thresholds = []
+        fractions = []
+        mean_values = []
+        failed_files = []
+        
+        # Create progress dialog
+        progress = QProgressDialog("Processing files...", "Cancel", 0, total_files, self)
+        progress.setWindowTitle("Processing")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        
+        for idx, row in df.iterrows():
+            if progress.wasCanceled():
+                QMessageBox.information(self, "Cancelled", "Processing was cancelled.")
+                return
+            
+            filename = row["Filename"]
+            directory = row["Directory"]
+            filepath = os.path.join(directory, filename)
+            
+            progress.setLabelText(f"Processing: {filename}")
+            progress.setValue(idx)
+            
+            # Load image silently
+            image = self._load_image_silent(filepath)
+            
+            if image is None:
+                # Failed to load - use NaN
+                thresholds.append(threshold_value)
+                fractions.append(np.nan)
+                mean_values.append(np.nan)
+                failed_files.append(filename)
+            else:
+                # Calculate values
+                total_pixels = image.size
+                pixels_above = image[image >= threshold_value]
+                count_above = len(pixels_above)
+                
+                fraction = count_above / total_pixels if total_pixels > 0 else 0.0
+                mean_val = np.mean(pixels_above) if count_above > 0 else np.nan
+                
+                thresholds.append(threshold_value)
+                fractions.append(fraction)
+                mean_values.append(mean_val)
+        
+        progress.setValue(total_files)
+        progress.close()
+        
+        # Update DataFrame
+        df[col_threshold] = thresholds
+        df[col_fraction] = fractions
+        df[col_mean_value] = mean_values
+        
+        # Save the DataFrame
+        if save_as_path:
+            save_path = save_as_path
+        else:
+            save_path = self._get_pickle_path_callback() if self._get_pickle_path_callback else None
+        
+        if not save_path:
+            QMessageBox.critical(
+                self,
+                "Error",
+                "Could not determine save path for the pickle file."
+            )
+            return
+        
+        try:
+            df.to_pickle(save_path)
+            
+            # Also update via callback if we're overwriting
+            if self._save_pickle_data_callback and not save_as_path:
+                self._save_pickle_data_callback(df, save_path)
+            
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Error",
+                f"Failed to save pickle file: {e}"
+            )
+            return
+        
+        # Show completion message
+        success_count = total_files - len(failed_files)
+        
+        if failed_files:
+            # Show warning with failed files
+            failed_list = "\n".join(failed_files[:20])  # Show first 20
+            if len(failed_files) > 20:
+                failed_list += f"\n... and {len(failed_files) - 20} more"
+            
+            QMessageBox.warning(
+                self,
+                "Processing Complete with Warnings",
+                f"Processing complete.\n\n"
+                f"Successfully processed: {success_count} files\n"
+                f"Failed to load: {len(failed_files)} files\n\n"
+                f"Failed files (NaN values used):\n{failed_list}\n\n"
+                f"Saved to: {save_path}"
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Processing Complete",
+                f"Successfully processed {success_count} files.\n\n"
+                f"Threshold: {threshold_value}\n"
+                f"Saved to: {save_path}"
+            )
+    
     def on_tab_selected(self):
         """Called when this tab becomes active."""
         # Refresh file list when tab is selected
@@ -671,5 +1172,7 @@ class RawProcessingTab(BaseTab):
         return {
             "pixel_intensities_enabled": self.pixel_intensities_toggle.isChecked(),
             "selected_file": self.file_list.currentItem().text() if self.file_list.currentItem() else None,
+            "threshold_enabled": self.threshold_toggle.isChecked(),
+            "threshold_value": self.threshold_spin.value(),
         }
 

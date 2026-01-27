@@ -606,6 +606,23 @@ class PickleDataFileTab(BaseTab):
         """
         return self._current_pickle_path
     
+    def update_dataframe(self, df: pd.DataFrame, filepath: str):
+        """
+        Update the DataFrame from an external source.
+        
+        This is called when another tab has modified and saved the DataFrame.
+        
+        Args:
+            df: The updated DataFrame.
+            filepath: The path where the DataFrame was saved.
+        """
+        self._dataframe = df
+        self._current_pickle_path = filepath
+        self._has_unsaved_changes = False
+        self._update_display()
+        self.directory_display.setText(filepath)
+        self.save_button.setEnabled(False)
+    
     def get_data(self) -> dict:
         """Get the current tab data."""
         return {
