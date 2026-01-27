@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QGroupBox, QSplitter, QFrame, QComboBox, QDoubleSpinBox,
     QMessageBox
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 
 # Matplotlib imports for embedding in PyQt6
 import matplotlib
@@ -46,6 +46,12 @@ class RawProcessingTab(BaseTab):
         # Callback to get pickle data
         self._get_pickle_data_callback: Callable | None = None
         self._current_image: np.ndarray | None = None
+        
+        # Debounce timer for auto-preview on file selection change
+        self._preview_debounce_timer = QTimer()
+        self._preview_debounce_timer.setSingleShot(True)
+        self._preview_debounce_timer.setInterval(400)  # 400ms delay
+        self._preview_debounce_timer.timeout.connect(self._on_debounced_file_selection)
         
         # Create main layout with splitters
         main_splitter = QSplitter(Qt.Orientation.Vertical)
@@ -209,6 +215,7 @@ class RawProcessingTab(BaseTab):
             }}
         """)
         self.file_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self.file_list.currentRowChanged.connect(self._on_file_selection_changed)
         layout.addWidget(self.file_list)
         
         return group_box
@@ -487,8 +494,86 @@ class RawProcessingTab(BaseTab):
             QMessageBox.critical(self, "Error", f"Failed to load image:\n{e}")
             return None
     
+    def _load_image_silent(self, filepath: str) -> np.ndarray | None:
+        """
+        Load an image from file without showing warning dialogs.
+        
+        Used for auto-preview to avoid spamming the user with dialogs.
+        
+        Args:
+            filepath: Full path to the image file.
+            
+        Returns:
+            Image as numpy array, or None if loading fails.
+        """
+        if not os.path.exists(filepath):
+            return None
+        
+        ext = os.path.splitext(filepath)[1].lower()
+        
+        try:
+            if ext in ['.tif', '.tiff']:
+                import tifffile
+                image = tifffile.imread(filepath)
+            elif ext == '.nd2':
+                from nd2reader import ND2Reader
+                with ND2Reader(filepath) as nd2:
+                    image = np.array(nd2[0])
+            else:
+                # Try PIL for other formats
+                from PIL import Image
+                image = np.array(Image.open(filepath))
+            
+            # Handle multi-channel images silently
+            if image.ndim > 2:
+                if image.ndim == 3:
+                    if image.shape[2] in [3, 4]:
+                        # RGB or RGBA - convert to grayscale
+                        if image.shape[2] == 3:
+                            image = np.mean(image, axis=2)
+                        else:
+                            image = np.mean(image[:, :, :3], axis=2)
+                    else:
+                        # Multiple channels - take first
+                        image = image[:, :, 0]
+                elif image.ndim == 4:
+                    # Time series or z-stack with channels
+                    image = image[0, 0, :, :] if image.shape[0] > 1 else image[0, :, :, 0]
+            
+            return image.astype(np.float64)
+            
+        except Exception:
+            return None
+    
+    def _on_file_selection_changed(self, row: int):
+        """Handle file selection change - start debounce timer."""
+        if row >= 0:
+            # Restart the debounce timer
+            self._preview_debounce_timer.start()
+    
+    def _on_debounced_file_selection(self):
+        """Handle debounced file selection - update preview after delay."""
+        # Only auto-update if there's a valid selection
+        file_info = self._get_selected_file_info()
+        if not file_info:
+            return
+        
+        directory, filename = file_info
+        filepath = os.path.join(directory, filename)
+        
+        # Load image (silently - no warning dialogs for auto-update)
+        image = self._load_image_silent(filepath)
+        if image is None:
+            return
+        
+        self._current_image = image
+        self._update_pixel_preview()
+    
     def _on_pixel_preview(self):
         """Handle Pixel Intensities preview button click."""
+        # Stop any pending debounce timer
+        self._preview_debounce_timer.stop()
+        
         # Get selected file info
         file_info = self._get_selected_file_info()
         if not file_info:
