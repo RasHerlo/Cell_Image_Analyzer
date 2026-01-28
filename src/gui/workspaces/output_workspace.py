@@ -262,6 +262,29 @@ class OutputWorkspace(BaseWorkspace):
             }}
         """
         
+        # Active toggle style (for Log-scale and Norm)
+        active_toggle_style = f"""
+            QCheckBox {{
+                font-size: 11px;
+                color: {Colors.TEXT};
+                spacing: 5px;
+            }}
+            QCheckBox::indicator {{
+                width: 14px;
+                height: 14px;
+            }}
+            QCheckBox::indicator:unchecked {{
+                border: 2px solid {Colors.BORDER};
+                border-radius: 3px;
+                background-color: #FFFFFF;
+            }}
+            QCheckBox::indicator:checked {{
+                border: 2px solid {Colors.ACTIVE};
+                border-radius: 3px;
+                background-color: {Colors.ACTIVE};
+            }}
+        """
+        
         self.heatmaps_toggle = QCheckBox("Heatmaps")
         self.heatmaps_toggle.setChecked(True)
         self.heatmaps_toggle.setEnabled(False)
@@ -283,6 +306,30 @@ class OutputWorkspace(BaseWorkspace):
         second_row.addStretch()
         
         layout.addLayout(second_row)
+        
+        # Third row: Sub-toggles for Intensity Distributions (Log-scale and Norm)
+        third_row = QHBoxLayout()
+        third_row.setSpacing(15)
+        
+        # Add spacing to align under "Intensity Distributions"
+        # Heatmaps checkbox takes about 90px
+        third_row.addSpacing(90)
+        
+        self.logscale_toggle = QCheckBox("Log-scale")
+        self.logscale_toggle.setChecked(False)
+        self.logscale_toggle.setStyleSheet(active_toggle_style)
+        self.logscale_toggle.toggled.connect(self._on_display_option_changed)
+        third_row.addWidget(self.logscale_toggle)
+        
+        self.norm_toggle = QCheckBox("Norm")
+        self.norm_toggle.setChecked(False)
+        self.norm_toggle.setStyleSheet(active_toggle_style)
+        self.norm_toggle.toggled.connect(self._on_display_option_changed)
+        third_row.addWidget(self.norm_toggle)
+        
+        third_row.addStretch()
+        
+        layout.addLayout(third_row)
         
         return group_box
     
@@ -450,6 +497,10 @@ class OutputWorkspace(BaseWorkspace):
         """Handle group toggle state change."""
         self._update_preview()
     
+    def _on_display_option_changed(self):
+        """Handle display option toggle change (Log-scale, Norm)."""
+        self._update_preview()
+    
     def _show_singles_placeholder(self):
         """Show placeholder when Singles mode is selected."""
         # Clear groups
@@ -558,7 +609,7 @@ class OutputWorkspace(BaseWorkspace):
             group_id = int(row["Group_ID"])
             
             toggle = QCheckBox(f"{group_name} ({group_id})")
-            toggle.setChecked(True)
+            toggle.setChecked(False)  # Default to OFF - sheets only render when selected
             toggle.setStyleSheet(toggle_style)
             toggle.toggled.connect(self._on_group_toggle_changed)
             
@@ -675,6 +726,10 @@ class OutputWorkspace(BaseWorkspace):
             ax.axis('off')
             return
         
+        # Get display options
+        use_log_scale = self.logscale_toggle.isChecked()
+        use_normalization = self.norm_toggle.isChecked()
+        
         # Get threshold value
         threshold = group_df.iloc[0]["Threshold"]
         
@@ -707,6 +762,7 @@ class OutputWorkspace(BaseWorkspace):
         # Collect data for composite plots
         file_labels = []
         fraction_values = []
+        intensity_data = []  # Store (pixels_above, color, label) for later plotting
         
         # Render heatmaps and collect data
         for idx, (_, row) in enumerate(group_df.iterrows()):
@@ -740,12 +796,10 @@ class OutputWorkspace(BaseWorkspace):
                 ax.imshow(masked_image, cmap='viridis', aspect='equal')
                 ax.imshow(mask, cmap='Greys', aspect='equal', alpha=mask.astype(float))
                 
-                # Also plot intensity distribution
+                # Collect intensity data for later plotting
                 pixels_above = image[image >= threshold]
                 if len(pixels_above) > 0:
-                    intensity_ax.hist(pixels_above, bins=100, alpha=0.6, 
-                                     color=colors[idx], label=display_name,
-                                     histtype='step', linewidth=1.5)
+                    intensity_data.append((pixels_above, colors[idx], display_name))
             else:
                 ax.text(0.5, 0.5, "Failed to load", ha='center', va='center',
                         fontsize=6, color='red', transform=ax.transAxes)
@@ -753,11 +807,41 @@ class OutputWorkspace(BaseWorkspace):
             ax.set_title(display_name, fontsize=6, pad=2)
             ax.axis('off')
         
+        # Plot intensity distributions with normalization support
+        if intensity_data:
+            # Determine common bin edges for all histograms
+            all_pixels = np.concatenate([data[0] for data in intensity_data])
+            bins = np.linspace(all_pixels.min(), all_pixels.max(), 101)
+            
+            for pixels_above, color, label in intensity_data:
+                # Compute histogram
+                counts, bin_edges = np.histogram(pixels_above, bins=bins)
+                bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+                
+                # Apply normalization if enabled
+                if use_normalization and counts.max() > 0:
+                    counts = counts / counts.max()
+                
+                # Plot as step line
+                intensity_ax.step(bin_centers, counts, where='mid', alpha=0.7,
+                                 color=color, label=label, linewidth=1.5)
+        
         # Configure intensity distribution plot
-        intensity_ax.set_title("Intensity Distributions", fontsize=9, fontweight='bold')
+        title_suffix = ""
+        if use_normalization:
+            title_suffix = " (Normalized)"
+        intensity_ax.set_title(f"Intensity Distributions{title_suffix}", fontsize=9, fontweight='bold')
         intensity_ax.set_xlabel("Pixel Value", fontsize=8)
-        intensity_ax.set_ylabel("Frequency", fontsize=8)
+        ylabel = "Normalized Frequency" if use_normalization else "Frequency"
+        intensity_ax.set_ylabel(ylabel, fontsize=8)
         intensity_ax.tick_params(labelsize=7)
+        
+        # Apply log scale if enabled
+        if use_log_scale:
+            intensity_ax.set_yscale('log')
+        else:
+            intensity_ax.set_yscale('linear')
+        
         if num_files <= 8:
             intensity_ax.legend(fontsize=5, loc='upper right')
         
@@ -776,12 +860,20 @@ class OutputWorkspace(BaseWorkspace):
         fractions_ax.set_xticks(x_pos)
         fractions_ax.set_xticklabels(file_labels, rotation=45, ha='right', fontsize=6)
         fractions_ax.tick_params(labelsize=7)
-        fractions_ax.set_ylim(0, 1)
+        
+        # Autoscale y-axis with y starting at 0 and padding at top
+        valid_fractions = [f for f in fraction_values if not np.isnan(f)]
+        if valid_fractions:
+            max_fraction = max(valid_fractions)
+            # Add 15% padding at top for value labels
+            fractions_ax.set_ylim(0, max_fraction * 1.15)
+        else:
+            fractions_ax.set_ylim(0, 1)
         
         # Add value labels on bars
         for bar, val in zip(bars, fraction_values):
             if not np.isnan(val):
-                fractions_ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
+                fractions_ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
                                  f'{val:.2f}', ha='center', va='bottom', fontsize=5)
     
     def _get_display_filename(self, filename: str, group_name: str) -> str:
