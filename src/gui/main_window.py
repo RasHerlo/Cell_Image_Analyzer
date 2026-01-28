@@ -140,11 +140,24 @@ class MainWindow(QMainWindow):
         # Get workspace references
         input_workspace: InputWorkspace = self._workspaces.get(WorkspaceID.INPUT)
         analysis_workspace: AnalysisWorkspace = self._workspaces.get(WorkspaceID.ANALYSIS)
+        output_workspace: OutputWorkspace = self._workspaces.get(WorkspaceID.OUTPUT)
         
         # Set up callback for Analysis workspace to get Input data
         if input_workspace and analysis_workspace:
             analysis_workspace.set_input_data_callback(
                 self._get_input_workspace_data
+            )
+        
+        # Set up callbacks for Output workspace to access pickle data
+        if output_workspace and analysis_workspace:
+            output_workspace.set_pickle_data_callback(
+                analysis_workspace.get_dataframe
+            )
+            output_workspace.set_pickle_path_callback(
+                analysis_workspace.get_pickle_path
+            )
+            output_workspace.set_load_pickle_callback(
+                self._load_pickle_file_globally
             )
     
     def _get_input_workspace_data(self) -> dict:
@@ -209,3 +222,19 @@ class MainWindow(QMainWindow):
         
         # Switch the visible workspace
         self.workspace_container.setCurrentWidget(new_workspace)
+    
+    def _load_pickle_file_globally(self, filepath: str):
+        """
+        Load a pickle file and update all workspaces.
+        
+        This method is called when a pickle file is selected from the Output workspace.
+        It loads the file and updates the Analysis workspace, which then propagates
+        to the Output workspace.
+        
+        Args:
+            filepath: Path to the pickle file to load.
+        """
+        analysis_workspace: AnalysisWorkspace = self._workspaces.get(WorkspaceID.ANALYSIS)
+        
+        if analysis_workspace:
+            analysis_workspace.load_pickle_file(filepath)

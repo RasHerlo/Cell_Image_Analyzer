@@ -623,6 +623,66 @@ class PickleDataFileTab(BaseTab):
         self.directory_display.setText(filepath)
         self.save_button.setEnabled(False)
     
+    def load_pickle_from_path(self, filepath: str):
+        """
+        Load a pickle file from a given path.
+        
+        This is called when a pickle file is selected from another workspace.
+        
+        Args:
+            filepath: Path to the pickle file to load.
+        """
+        try:
+            # Load the pickle file
+            df = pd.read_pickle(filepath)
+            
+            # Validate it has Filename column
+            if self.COL_FILENAME not in df.columns:
+                QMessageBox.warning(
+                    self,
+                    "Invalid File",
+                    f"The pickle file must contain a '{self.COL_FILENAME}' column."
+                )
+                return
+            
+            # Check if Directory column exists
+            if self.COL_DIRECTORY not in df.columns:
+                # Prompt user to select directory
+                directory = self._prompt_for_directory(filepath)
+                if directory is None:
+                    # User cancelled
+                    return
+                
+                # Add Directory column right after Filename
+                df.insert(1, self.COL_DIRECTORY, directory)
+                
+                # Save the updated pickle file
+                try:
+                    df.to_pickle(filepath)
+                    QMessageBox.information(
+                        self,
+                        "Directory Added",
+                        f"The Directory column has been added and saved to the pickle file."
+                    )
+                except Exception as e:
+                    QMessageBox.critical(
+                        self,
+                        "Error",
+                        f"Failed to save updated pickle file: {e}"
+                    )
+                    return
+            
+            self._dataframe = df
+            self._current_pickle_path = filepath
+            self._has_unsaved_changes = False
+            self._update_display()
+            self.directory_display.setText(filepath)
+            self.save_button.setEnabled(False)
+            self.pickle_loaded.emit(filepath)
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load pickle file: {e}")
+    
     def get_data(self) -> dict:
         """Get the current tab data."""
         return {

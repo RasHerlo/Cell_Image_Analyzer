@@ -161,3 +161,15 @@ class AnalysisWorkspace(BaseWorkspace):
             filepath: The path where the DataFrame was saved.
         """
         self.pickle_datafile_tab.update_dataframe(df, filepath)
+    
+    def load_pickle_file(self, filepath: str):
+        """
+        Load a pickle file from an external path.
+        
+        This is called when a pickle file is selected from another workspace
+        (e.g., Output workspace).
+        
+        Args:
+            filepath: Path to the pickle file to load.
+        """
+        self.pickle_datafile_tab.load_pickle_from_path(filepath)
