@@ -84,6 +84,9 @@ The Input workspace is where you select and organize your image files.
 - **Group Preview**: View how files are distributed across groups
 - **Group Management**: Create, rename, or delete groups
 
+<img width="1283" height="830" alt="image" src="https://github.com/user-attachments/assets/c720e974-6c01-4e86-ba2a-69ffcbc3d45e" />
+
+
 ---
 
 ### 2. Analysis Workspace
