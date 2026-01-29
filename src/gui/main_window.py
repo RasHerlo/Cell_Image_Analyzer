@@ -2,6 +2,8 @@
 Main Window - The primary application window with navigation and workspace container.
 """
 
+# Just to make an edit
+
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QFrame, QStackedWidget
