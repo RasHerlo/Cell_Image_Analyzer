@@ -389,7 +389,7 @@ class PickleDataFileTab(BaseTab):
             "Save New Pickle File",
             os.path.join(default_dir, "analysis_data.pkl"),
             "Pickle Files (*.pkl);;All Files (*)"
-        )
+        ) 
         
         if filepath:
             # Ensure .pkl extension
@@ -418,6 +418,7 @@ class PickleDataFileTab(BaseTab):
             default_dir,
             "Pickle Files (*.pkl);;All Files (*)"
         )
+        
         
         if filepath:
             try:

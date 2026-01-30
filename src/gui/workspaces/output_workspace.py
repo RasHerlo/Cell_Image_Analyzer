@@ -64,6 +64,10 @@ class OutputWorkspace(BaseWorkspace):
         self._sheets_data: list[dict] = []
         self._preview_cancelled: bool = False
         
+        # Sheet caching - maps group_name to (group_id, sheet_widget)
+        self._rendered_sheets: dict[str, tuple[int, QWidget]] = {}
+        self._force_full_rebuild: bool = False  # Set to True when display options change
+        
         # Debounce timer for group toggle changes
         self._group_toggle_debounce_timer = QTimer()
         self._group_toggle_debounce_timer.setSingleShot(True)
@@ -420,6 +424,43 @@ class OutputWorkspace(BaseWorkspace):
         scroll_area.setWidget(self.groups_container)
         layout.addWidget(scroll_area)
         
+        # Select All / Deselect All buttons row
+        buttons_row = QHBoxLayout()
+        buttons_row.setSpacing(10)
+        
+        button_style = f"""
+            QPushButton {{
+                padding: 5px 10px;
+                background-color: {Colors.SECONDARY};
+                color: white;
+                border: none;
+                border-radius: 4px;
+                font-size: 10px;
+            }}
+            QPushButton:hover {{
+                background-color: {Colors.HOVER};
+            }}
+            QPushButton:pressed {{
+                background-color: {Colors.PRIMARY};
+            }}
+        """
+        
+        self.select_all_button = QPushButton("Select All")
+        self.select_all_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.select_all_button.setStyleSheet(button_style)
+        self.select_all_button.clicked.connect(self._on_select_all)
+        buttons_row.addWidget(self.select_all_button)
+        
+        self.deselect_all_button = QPushButton("Deselect All")
+        self.deselect_all_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.deselect_all_button.setStyleSheet(button_style)
+        self.deselect_all_button.clicked.connect(self._on_deselect_all)
+        buttons_row.addWidget(self.deselect_all_button)
+        
+        buttons_row.addStretch()
+        
+        layout.addLayout(buttons_row)
+        
         return group_box
     
     def _create_preview_pane(self) -> QGroupBox:
@@ -537,7 +578,31 @@ class OutputWorkspace(BaseWorkspace):
     
     def _on_display_option_changed(self):
         """Handle display option toggle change (Log-scale, Norm)."""
+        # Display options affect all sheets, so force full rebuild
+        self._force_full_rebuild = True
         # Also debounce display option changes
+        self._group_toggle_debounce_timer.start()
+    
+    def _on_select_all(self):
+        """Handle Select All button click."""
+        # Block signals to prevent multiple updates
+        for toggle in self._group_toggles.values():
+            toggle.blockSignals(True)
+            toggle.setChecked(True)
+            toggle.blockSignals(False)
+        
+        # Trigger single update
+        self._group_toggle_debounce_timer.start()
+    
+    def _on_deselect_all(self):
+        """Handle Deselect All button click."""
+        # Block signals to prevent multiple updates
+        for toggle in self._group_toggles.values():
+            toggle.blockSignals(True)
+            toggle.setChecked(False)
+            toggle.blockSignals(False)
+        
+        # Trigger single update
         self._group_toggle_debounce_timer.start()
     
     def _show_singles_placeholder(self):
@@ -562,7 +627,7 @@ class OutputWorkspace(BaseWorkspace):
         self._group_toggles.clear()
     
     def _clear_preview(self):
-        """Clear all sheets from the preview."""
+        """Clear all sheets from the preview and cache."""
         # Remove all widgets except placeholder
         while self.sheets_layout.count() > 1:
             item = self.sheets_layout.takeAt(1)
@@ -570,6 +635,7 @@ class OutputWorkspace(BaseWorkspace):
                 item.widget().deleteLater()
         
         self._sheets_data.clear()
+        self._rendered_sheets.clear()
     
     # ==================== Data Update Methods ====================
     
@@ -584,6 +650,9 @@ class OutputWorkspace(BaseWorkspace):
                 self.pickle_path_display.setText(self._current_pickle_path)
             else:
                 self.pickle_path_display.clear()
+        
+        # Data has changed, so invalidate all cached sheets
+        self._force_full_rebuild = True
         
         # Update UI based on current selection
         if self.groups_button.isChecked():
@@ -659,11 +728,11 @@ class OutputWorkspace(BaseWorkspace):
         self.groups_layout.addStretch()
     
     def _update_preview(self):
-        """Update the preview pane with sheets for selected groups."""
-        self._clear_preview()
+        """Update the preview pane with sheets for selected groups using incremental updates."""
         self._preview_cancelled = False
         
         if self._dataframe is None or self._dataframe.empty:
+            self._clear_preview()
             self.preview_placeholder.setText("No data available.\n\nLoad a pickle file to see preview.")
             self.preview_placeholder.show()
             return
@@ -672,58 +741,82 @@ class OutputWorkspace(BaseWorkspace):
         required_cols = ["Filename", "Directory", "Group", "Group_ID"]
         missing_cols = [col for col in required_cols if col not in self._dataframe.columns]
         if missing_cols:
+            self._clear_preview()
             self.preview_placeholder.setText(f"Missing columns: {', '.join(missing_cols)}")
             self.preview_placeholder.show()
             return
         
         # Check for threshold data
         if "Threshold" not in self._dataframe.columns:
+            self._clear_preview()
             self.preview_placeholder.setText("No threshold data found.\n\nProcess files in the Raw Processing tab first.")
             self.preview_placeholder.show()
             return
         
         # Get selected groups
-        selected_groups = [name for name, toggle in self._group_toggles.items() if toggle.isChecked()]
+        selected_groups = set(name for name, toggle in self._group_toggles.items() if toggle.isChecked())
         
         if not selected_groups:
+            self._clear_preview()
             self.preview_placeholder.setText("No groups selected.\n\nSelect at least one group to preview.")
             self.preview_placeholder.show()
             return
         
         self.preview_placeholder.hide()
         
-        total_groups = len(selected_groups)
+        # Check if we need full rebuild (display options changed)
+        if self._force_full_rebuild:
+            self._clear_preview()
+            self._force_full_rebuild = False
         
-        # Show progress dialog for multiple groups or groups with many files
-        show_progress = total_groups > 1 or any(
+        # Get currently rendered groups
+        currently_rendered = set(self._rendered_sheets.keys())
+        
+        # Determine what to add and remove
+        groups_to_remove = currently_rendered - selected_groups
+        groups_to_add = selected_groups - currently_rendered
+        
+        # Remove sheets for deselected groups
+        for group_name in groups_to_remove:
+            if group_name in self._rendered_sheets:
+                group_id, sheet_widget = self._rendered_sheets[group_name]
+                self.sheets_layout.removeWidget(sheet_widget)
+                sheet_widget.deleteLater()
+                del self._rendered_sheets[group_name]
+        
+        # If nothing to add, we're done
+        if not groups_to_add:
+            # Make sure sheets are in correct order
+            self._reorder_sheets()
+            return
+        
+        # Show progress dialog for adding new sheets
+        total_to_add = len(groups_to_add)
+        show_progress = total_to_add > 1 or any(
             len(self._dataframe[self._dataframe["Group"] == g]) > 3 
-            for g in selected_groups
+            for g in groups_to_add
         )
         
         progress = None
         if show_progress:
-            progress = QProgressDialog("Generating preview sheets...", "Cancel", 0, total_groups, self)
+            progress = QProgressDialog("Generating preview sheets...", "Cancel", 0, total_to_add, self)
             progress.setWindowTitle("Generating Preview")
             progress.setWindowModality(Qt.WindowModality.WindowModal)
-            progress.setMinimumDuration(0)  # Show immediately
+            progress.setMinimumDuration(0)
             progress.setValue(0)
             progress.setMinimumWidth(350)
-            # Process events to show dialog immediately
             QApplication.processEvents()
         
-        # Create a sheet for each selected group
-        for idx, group_name in enumerate(selected_groups):
+        # Create sheets for newly selected groups
+        for idx, group_name in enumerate(groups_to_add):
             # Check for cancellation
             if progress and progress.wasCanceled():
                 self._preview_cancelled = True
-                self._clear_preview()
-                self.preview_placeholder.setText("Preview generation cancelled.\n\nSelect groups to preview.")
-                self.preview_placeholder.show()
                 break
             
             # Update progress
             if progress:
-                progress.setLabelText(f"Generating sheet {idx + 1}/{total_groups}: {group_name}")
+                progress.setLabelText(f"Generating sheet {idx + 1}/{total_to_add}: {group_name}")
                 progress.setValue(idx)
                 QApplication.processEvents()
             
@@ -735,15 +828,42 @@ class OutputWorkspace(BaseWorkspace):
             
             # Create sheet widget
             sheet = self._create_sheet(group_name, group_id, group_df)
+            
+            # Store in cache
+            self._rendered_sheets[group_name] = (group_id, sheet)
+            
+            # Add to layout (will be reordered after)
             self.sheets_layout.addWidget(sheet)
             
-            # Process events to keep UI responsive and update progress
+            # Process events to keep UI responsive
             QApplication.processEvents()
         
         # Close progress dialog
         if progress:
-            progress.setValue(total_groups)
+            progress.setValue(total_to_add)
             progress.close()
+        
+        # Reorder sheets by Group_ID
+        self._reorder_sheets()
+    
+    def _reorder_sheets(self):
+        """Reorder sheets in the layout by Group_ID."""
+        if not self._rendered_sheets:
+            return
+        
+        # Sort groups by their Group_ID
+        sorted_groups = sorted(
+            self._rendered_sheets.items(),
+            key=lambda x: x[1][0]  # Sort by group_id (second element of tuple)
+        )
+        
+        # Remove all sheets from layout (but don't delete them)
+        for group_name, (group_id, sheet) in self._rendered_sheets.items():
+            self.sheets_layout.removeWidget(sheet)
+        
+        # Re-add in sorted order (after the placeholder which is at index 0)
+        for group_name, (group_id, sheet) in sorted_groups:
+            self.sheets_layout.addWidget(sheet)
     
     def _create_sheet(self, group_name: str, group_id: int, group_df: pd.DataFrame) -> QWidget:
         """
